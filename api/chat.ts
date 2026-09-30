@@ -2,30 +2,31 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 const REQUEST_TIMEOUT_MS = 8000;
 
-const SYSTEM_PROMPT = `
-You are DOG, a helpful AI assistant.
-
-Never mention internal providers, routing, API keys, environment variables,
-or which model generated the response.
-
-For coding requests:
-- If requirements are incomplete, ask the useful clarification questions first.
-- If requirements are clear, provide working code.
-- Keep answers practical and direct.
-`.trim();
-
-type ChatMessage = {
-  role: "user" | "assistant" | "system";
+type Message = {
+  role: "user" | "assistant";
   content: string;
 };
 
-function normalizeMessages(body: any): ChatMessage[] {
+const SYSTEM_PROMPT = `
+You are DOG, a helpful AI assistant.
+
+For coding requests:
+- If requirements are unclear, ask the necessary question.
+- If requirements are clear, provide working code.
+- Be practical and direct.
+
+Never mention internal providers, API keys,
+routing, environment variables, or backend implementation.
+`.trim();
+
+function getMessages(body: any): Message[] {
   const history = Array.isArray(body?.history)
     ? body.history
         .filter(
           (m: any) =>
             m &&
-            (m.role === "user" || m.role === "assistant") &&
+            (m.role === "user" ||
+              m.role === "assistant") &&
             typeof m.content === "string" &&
             m.content.trim()
         )
@@ -55,23 +56,29 @@ function normalizeMessages(body: any): ChatMessage[] {
     }
   }
 
-  return [
-    {
-      role: "system",
-      content: SYSTEM_PROMPT,
-    },
-    ...history.slice(-20),
-  ];
+  return history.slice(-20);
 }
 
-async function xaiRequest(
-  messages: ChatMessage[],
-  signal: AbortSignal
-): Promise<string> {
-  const apiKey = process.env.XAI_API_KEY || process.env.GROK_API_KEY;
+function timeoutController() {
+  const controller = new AbortController();
 
-  if (!apiKey) {
-    throw new Error("DOG API key is not configured.");
+  setTimeout(() => {
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+
+  return controller;
+}
+
+async function askGrok(
+  messages: Message[],
+  controller: AbortController
+) {
+  const key =
+    process.env.XAI_API_KEY?.trim() ||
+    process.env.GROK_API_KEY?.trim();
+
+  if (!key) {
+    throw new Error("Grok API key is not configured.");
   }
 
   const response = await fetch(
@@ -79,18 +86,24 @@ async function xaiRequest(
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${key}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         model:
-          process.env.XAI_TEXT_MODEL ||
-          process.env.GROK_TEXT_MODEL ||
+          process.env.XAI_TEXT_MODEL?.trim() ||
+          process.env.GROK_TEXT_MODEL?.trim() ||
           "grok-beta",
-        messages,
-        temperature: 0.7,
+        messages: [
+          {
+            role: "system",
+            content: SYSTEM_PROMPT,
+          },
+          ...messages,
+        ],
+        temperature: 0.4,
       }),
-      signal,
+      signal: controller.signal,
     }
   );
 
@@ -99,8 +112,7 @@ async function xaiRequest(
   if (!response.ok) {
     throw new Error(
       data?.error?.message ||
-        data?.error ||
-        `DOG provider returned ${response.status}`
+        `Grok returned ${response.status}`
     );
   }
 
@@ -109,58 +121,55 @@ async function xaiRequest(
   ).trim();
 
   if (!text) {
-    throw new Error("Empty DOG response.");
+    throw new Error("Grok returned an empty response.");
   }
 
   return text;
 }
 
-async function geminiRequest(
-  messages: ChatMessage[],
-  signal: AbortSignal
-): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
+async function askGemini(
+  messages: Message[],
+  controller: AbortController
+) {
+  const key = process.env.GEMINI_API_KEY?.trim();
 
-  if (!apiKey) {
-    throw new Error("DOG API key is not configured.");
+  if (!key) {
+    throw new Error("Gemini API key is not configured.");
   }
 
-  const system = messages.find(
-    (m) => m.role === "system"
-  )?.content;
-
-  const contents = messages
-    .filter((m) => m.role !== "system")
-    .map((m) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
-    }));
-
   const model =
-    process.env.GEMINI_TEXT_MODEL ||
+    process.env.GEMINI_TEXT_MODEL?.trim() ||
     "gemini-1.5-flash";
 
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-      apiKey
-    )}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+      model
+    )}:generateContent?key=${encodeURIComponent(key)}`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        systemInstruction: system
-          ? {
-              parts: [{ text: system }],
-            }
-          : undefined,
-        contents,
+        systemInstruction: {
+          parts: [
+            {
+              text: SYSTEM_PROMPT,
+            },
+          ],
+        },
+        contents: messages.map((m) => ({
+          role:
+            m.role === "assistant"
+              ? "model"
+              : "user",
+          parts: [{ text: m.content }],
+        })),
         generationConfig: {
-          temperature: 0.7,
+          temperature: 0.4,
         },
       }),
-      signal,
+      signal: controller.signal,
     }
   );
 
@@ -169,94 +178,75 @@ async function geminiRequest(
   if (!response.ok) {
     throw new Error(
       data?.error?.message ||
-        `DOG provider returned ${response.status}`
+        `Gemini returned ${response.status}`
     );
   }
 
   const text = String(
     data?.candidates?.[0]?.content?.parts
-      ?.map((part: any) => part?.text || "")
+      ?.map((p: any) => p?.text || "")
       .join("") || ""
   ).trim();
 
   if (!text) {
-    throw new Error("Empty DOG response.");
+    throw new Error("Gemini returned an empty response.");
   }
 
   return text;
 }
 
-async function raceProviders(
-  messages: ChatMessage[]
-): Promise<string> {
-  const controllers = [
-    new AbortController(),
-    new AbortController(),
-  ];
-
-  const providers = [
-    xaiRequest(messages, controllers[0].signal),
-    geminiRequest(messages, controllers[1].signal),
-  ];
+async function raceProviders(messages: Message[]) {
+  const grokController = timeoutController();
+  const geminiController = timeoutController();
 
   return new Promise<string>((resolve, reject) => {
     let failures = 0;
     let finished = false;
+
     const errors: string[] = [];
 
-    const timer = setTimeout(() => {
+    const success = (text: string) => {
       if (finished) return;
 
       finished = true;
-      controllers.forEach((controller) => controller.abort());
 
-      reject(
-        new Error(
-          "DOG timed out. Please try again."
-        )
+      // Stop losing request immediately.
+      grokController.abort();
+      geminiController.abort();
+
+      resolve(text);
+    };
+
+    const failure = (error: unknown) => {
+      if (finished) return;
+
+      failures++;
+
+      errors.push(
+        error instanceof Error
+          ? error.message
+          : "Provider failed."
       );
-    }, REQUEST_TIMEOUT_MS);
 
-    providers.forEach((promise) => {
-      promise
-        .then((text) => {
-          if (finished) return;
+      if (failures === 2) {
+        finished = true;
 
-          finished = true;
-          clearTimeout(timer);
+        reject(
+          new Error(
+            errors.join(" | ") ||
+              "DOG could not get a response."
+          )
+        );
+      }
+    };
 
-          // First successful provider wins.
-          // Stop the other request to avoid unnecessary usage.
-          controllers.forEach((controller) => {
-            controller.abort();
-          });
+    void askGrok(messages, grokController)
+      .then(success)
+      .catch(failure);
 
-          resolve(text);
-        })
-        .catch((error) => {
-          if (finished) return;
-
-          failures++;
-
-          errors.push(
-            error instanceof Error
-              ? error.message
-              : "Provider failed."
-          );
-
-          if (failures === providers.length) {
-            finished = true;
-            clearTimeout(timer);
-
-            reject(
-              new Error(
-                errors.join(" | ") ||
-                  "DOG could not get a response."
-              )
-            );
-          }
-        });
-    });
+    void askGemini(messages, geminiController)
+      .then(success)
+      .catch(failure);
   });
 }
 
@@ -264,6 +254,8 @@ export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ) {
+  res.setHeader("Cache-Control", "no-store");
+
   if (req.method !== "POST") {
     return res.status(405).json({
       ok: false,
@@ -272,13 +264,9 @@ export default async function handler(
   }
 
   try {
-    const messages = normalizeMessages(req.body);
+    const messages = getMessages(req.body);
 
-    const hasUserMessage = messages.some(
-      (m) => m.role === "user" && m.content.trim()
-    );
-
-    if (!hasUserMessage) {
+    if (!messages.length) {
       return res.status(400).json({
         ok: false,
         error: "Message is required.",
@@ -294,7 +282,9 @@ export default async function handler(
   } catch (error) {
     const message =
       error instanceof Error
-        ? error.message
+        ? error.name === "AbortError"
+          ? "DOG timed out. Please try again."
+          : error.message
         : "DOG could not get a response.";
 
     return res.status(502).json({
@@ -302,4 +292,4 @@ export default async function handler(
       error: message,
     });
   }
-    }
+        }
