@@ -1,146 +1,655 @@
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Menu, Image as ImageIcon, Code2, Brain, UserCircle2, Copy, Plus, RotateCcw } from "lucide-react";
+import {
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
+import {
+  Menu,
+  Image as ImageIcon,
+  Code2,
+  Brain,
+  UserCircle2,
+  Copy,
+  Plus,
+  RotateCcw,
+} from "lucide-react";
+
 import DogLoader from "../components/DogLoader";
 import ChatInput from "../components/ChatInput";
 import { useAuth } from "../context/AuthContext";
 import { useApp } from "../context/AppContext";
 import type { AppPage } from "../types";
 
-interface HomeProps{onOpenMenu:()=>void;onNavigate:(page:AppPage)=>void;onOpenAccount:()=>void;}
-type Msg={role:"user"|"assistant";content:string};
-function formatText(text:string){return text.split(/(```[\s\S]*?```)/g).map((part,i)=>part.startsWith("```")?<pre key={i}>{part.replace(/^```\w*\n?/ ,"").replace(/```$/,"\n")}</pre>:part.split(/\n\n+/).map((p,j)=><p key={`${i}-${j}`}>{p.replace(/^###\s+/gm,"").replace(/^##\s+/gm,"").replace(/^#\s+/gm,"")}</p>));}
-function typeResponse(full:string,setMessages:Dispatch<SetStateAction<Msg[]>>,onDone:()=>Promise<void>,isCurrent:()=>boolean){
- let index=0;
- const step=()=>{if(!isCurrent())return;index=Math.min(full.length,index+Math.max(2,Math.ceil(full.length/140)));const partial=full.slice(0,index);setMessages(v=>{const next=[...v];const last=next[next.length-1];if(last?.role==="assistant")next[next.length-1]={role:"assistant",content:partial};else next.push({role:"assistant",content:partial});return next;});if(index<full.length)window.setTimeout(step,14);else void onDone();};
- step();
+interface HomeProps {
+  onOpenMenu: () => void;
+  onNavigate: (page: AppPage) => void;
+  onOpenAccount: () => void;
 }
 
-export default function Home({onOpenMenu,onNavigate,onOpenAccount}:HomeProps){
- const {user}=useAuth();
- const {memoryEnabled,activeChatId,setActiveChatId,createChat,loadMessages,saveMessage,chats}=useApp();
- const [messages,setMessages]=useState<Msg[]>([]);
- const [loading,setLoading]=useState(false);
- const [copied,setCopied]=useState<string|null>(null);
- const [newSession,setNewSession]=useState(true);
- const requestRef=useRef<AbortController|null>(null);
- const sessionRef=useRef(0);
+type Msg = {
+  role: "user" | "assistant";
+  content: string;
+};
 
- useEffect(()=>{
-   let cancelled=false;
-   setNewSession(!activeChatId);
-   (async()=>{if(!activeChatId){setMessages([]);return;}const saved=await loadMessages(activeChatId);if(!cancelled){setMessages(saved.map(m=>({role:m.role,content:m.content})));setNewSession(false);}})();
-   return()=>{cancelled=true;};
- },[activeChatId,loadMessages]);
+export default function Home({
+  onOpenMenu,
+  onNavigate,
+  onOpenAccount,
+}: HomeProps) {
+  const { user } = useAuth();
 
- const startNewChat=()=>{
-   sessionRef.current+=1;
-   requestRef.current?.abort();
-   requestRef.current=null;
-   setLoading(false);
-   setMessages([]);
-   setCopied(null);
-   setNewSession(true);
-   setActiveChatId(null);
- };
+  const {
+    memoryEnabled,
+    activeChatId,
+    setActiveChatId,
+    createChat,
+    loadMessages,
+    saveMessage,
+    chats,
+  } = useApp();
 
- const handleSend=async(message:string)=>{
-   const requestId=++sessionRef.current;
-   const cleanMessage=message.trim();
-   if(!cleanMessage)return;
+  const [messages, setMessages] =
+    useState<Msg[]>([]);
 
-   // Put the user's message on screen before any Firebase/API operation.
-   setNewSession(false);
-   setMessages(v=>[...v,{role:"user",content:cleanMessage}]);
-   setLoading(true);
+  const [loading, setLoading] =
+    useState(false);
 
-   let chatId=activeChatId;
-   try{
-     // A fresh discussion gets its chat document first, but we do not switch
-     // the active-chat loader until the user's message has been persisted.
-     if(!chatId){
-       chatId=await createChat(cleanMessage.slice(0,45)||"New chat");
-       if(!chatId)throw new Error("DOG could not create the conversation. Check Firebase configuration and permissions.");
-     }
+  const [copied, setCopied] =
+    useState<string | null>(null);
 
-     if(requestId!==sessionRef.current)return;
+  const [newSession, setNewSession] =
+    useState(true);
 
-     try{
-       await saveMessage(chatId,"user",cleanMessage);
-     }catch(error){
-       throw new Error(`Your message could not be saved: ${error instanceof Error?error.message:"Firebase save failed."}`);
-     }
+  const requestRef =
+    useRef<AbortController | null>(null);
 
-     // Now it is safe to make this chat the active persisted chat.
-     setActiveChatId(chatId);
+  const sessionRef =
+    useRef(0);
 
-     const history=[...messages.slice(-12),{role:"user",content:cleanMessage}]
-       .map(m=>({role:m.role,content:m.content}));
+  /*
+   * Load a selected existing chat.
+   */
+  useEffect(() => {
+    let cancelled = false;
 
-     const controller=new AbortController();
-     requestRef.current=controller;
-     const responseTimeout=window.setTimeout(()=>controller.abort(),35000);
+    if (!activeChatId) {
+      setMessages([]);
+      setNewSession(true);
+      return;
+    }
 
-     try{
-       const r=await fetch("/api/chat",{
-         method:"POST",
-         headers:{"Content-Type":"application/json","Accept":"application/json"},
-         body:JSON.stringify({message:cleanMessage,history}),
-         signal:controller.signal
-       });
+    setNewSession(false);
 
-       const raw=await r.text();
-       let data:any={};
-       if(raw.trim()){
-         try{data=JSON.parse(raw);}
-         catch{throw new Error(raw.trim().slice(0,1000)||`DOG server returned an invalid response (${r.status}).`);}
-       }
-       if(!r.ok)throw new Error(data?.error||data?.message||`DOG could not get a response (${r.status}).`);
+    const run = async () => {
+      try {
+        const saved =
+          await loadMessages(
+            activeChatId
+          );
 
-       const answer=String(data?.text||"").trim();
-       if(!answer)throw new Error("DOG returned an empty response. Check the AI API configuration.");
+        if (cancelled) return;
 
-       await new Promise<void>(resolve=>{
-         typeResponse(
-           answer,
-           setMessages,
-           async()=>{
-             if(requestId===sessionRef.current){
-               try{await saveMessage(chatId!,"assistant",answer);}
-               catch(error){
-                 setMessages(v=>[...v,{role:"assistant",content:`DOG replied, but saving the response failed: ${error instanceof Error?error.message:"Firebase save failed."}`}]);
-               }
-             }
-             resolve();
-           },
-           ()=>requestId===sessionRef.current
-         );
-       });
-     }finally{
-       window.clearTimeout(responseTimeout);
-     }
-   }catch(error){
-     if(requestId!==sessionRef.current)return;
-     const text=(error instanceof Error && error.name==="AbortError")
-       ?"DOG took too long to respond. Please try again."
-       :(error instanceof Error?error.message:"DOG could not send your message.");
-     setMessages(v=>[...v,{role:"assistant",content:text}]);
-     if(chatId){
-       try{await saveMessage(chatId,"assistant",text);}catch{}
-     }
-   }finally{
-     if(requestId===sessionRef.current){
-       setLoading(false);
-       requestRef.current=null;
-     }
-   }
- };
+        setMessages(
+          saved.map((message) => ({
+            role: message.role,
+            content: message.content,
+          }))
+        );
+      } catch (error) {
+        if (cancelled) return;
 
- const activeTitle=chats.find(c=>c.id===activeChatId)?.title||"New discussion";
- const inChat=!newSession;
- return <div className={`home ${inChat?"chat-active":"home-idle"}`}>
-  <header className="mobile-header"><button className="menu-button" onClick={onOpenMenu} aria-label="Open menu"><Menu size={25}/></button><div className="mobile-brand">DOG</div><button className="mobile-profile-button" onClick={onOpenAccount} aria-label="Open account"><UserCircle2 size={25}/></button></header>
-  {!inChat&&<><section className="feature-section"><button className="feature-card compact-feature" onClick={()=>onNavigate("images")}><div className="feature-icon"><ImageIcon size={26}/></div><div className="feature-title">Image Creation</div></button><button className="feature-card compact-feature" onClick={()=>onNavigate("code")}><div className="feature-icon"><Code2 size={26}/></div><div className="feature-title">Code Builder</div></button></section><section className="hero-section"><DogLoader size={92}/><h1>Hello, {user?.displayName?.split(" ")[0]||"there"}.<br/>What are you building?</h1>{memoryEnabled&&<div className="memory-hint"><Brain size={16}/> Memory is on</div>}</section></>}
-  {inChat&&<section className="discussion-screen"><div className="discussion-head"><strong>{activeTitle}</strong><button onClick={startNewChat}><Plus size={16}/> New discussion</button></div><div className="discussion-messages">{messages.length===0&&!loading&&<div className="empty-discussion"><DogLoader size={78}/><h2>New discussion</h2><button className="reset-discussion" onClick={startNewChat}><RotateCcw size={14}/> Start again</button></div>}{messages.map((m,i)=><div className={`message-bubble ${m.role}`} key={`${i}-${m.content.slice(0,8)}`}><div className="preview-label">{m.role==="user"?"You":"DOG"}</div><div className="preview-message">{m.role==="assistant"?formatText(m.content):<p>{m.content}</p>}</div>{m.role==="assistant"&&<button className="copy-response" onClick={()=>{void navigator.clipboard?.writeText(m.content);setCopied(String(i));setTimeout(()=>setCopied(null),1200)}}><Copy size={14}/> {copied===String(i)?"Copied":"Copy"}</button>}</div>)}{loading&&<div className="ai-loading"><DogLoader size={46} label="DOG is thinking…"/></div>}</div></section>}
-  <section className={`chat-section ${inChat?"chat-section-active":""}`}><ChatInput onSend={handleSend} disabled={loading}/></section>
- </div>;
+        setMessages([
+          {
+            role: "assistant",
+            content:
+              error instanceof Error
+                ? error.message
+                : "DOG could not load this chat.",
+          },
+        ]);
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeChatId,
+    loadMessages,
+  ]);
+
+  /*
+   * Start a genuinely fresh conversation.
+   */
+  const startNewChat = () => {
+    sessionRef.current += 1;
+
+    requestRef.current?.abort();
+    requestRef.current = null;
+
+    setLoading(false);
+    setMessages([]);
+    setCopied(null);
+    setNewSession(true);
+    setActiveChatId(null);
+  };
+
+  /*
+   * Send message.
+   *
+   * Important:
+   * 1. Show the message immediately.
+   * 2. Create/save chat.
+   * 3. Ask DOG.
+   * 4. Show/save response.
+   *
+   * A Firebase/API failure must never erase
+   * the user's message.
+   */
+  const handleSend = async (
+    rawMessage: string
+  ) => {
+    const message = rawMessage.trim();
+
+    if (!message || loading) return;
+
+    const requestId =
+      ++sessionRef.current;
+
+    requestRef.current?.abort();
+
+    /*
+     * Immediately show the user's message.
+     */
+    setNewSession(false);
+
+    setMessages((current) => [
+      ...current,
+      {
+        role: "user",
+        content: message,
+      },
+    ]);
+
+    setLoading(true);
+
+    let chatId =
+      activeChatId;
+
+    try {
+      /*
+       * Create a chat only when needed.
+       */
+      if (!chatId) {
+        chatId = await createChat(
+          message.slice(0, 45) ||
+            "New chat"
+        );
+
+        if (!chatId) {
+          throw new Error(
+            "DOG could not create the conversation."
+          );
+        }
+      }
+
+      if (
+        requestId !==
+        sessionRef.current
+      ) {
+        return;
+      }
+
+      /*
+       * Save the user's message.
+       */
+      await saveMessage(
+        chatId,
+        "user",
+        message
+      );
+
+      if (
+        requestId !==
+        sessionRef.current
+      ) {
+        return;
+      }
+
+      /*
+       * Now make this chat active.
+       */
+      setActiveChatId(chatId);
+
+      /*
+       * Include the message being sent.
+       * Do not depend on React state having updated yet.
+       */
+      const currentHistory =
+        messages.slice(-12);
+
+      const history = [
+        ...currentHistory,
+        {
+          role: "user" as const,
+          content: message,
+        },
+      ];
+
+      const controller =
+        new AbortController();
+
+      requestRef.current =
+        controller;
+
+      const timeout =
+        window.setTimeout(() => {
+          controller.abort();
+        }, 30000);
+
+      try {
+        const response =
+          await fetch("/api/chat", {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+              Accept:
+                "application/json",
+            },
+            body: JSON.stringify({
+              message,
+              history,
+            }),
+            signal:
+              controller.signal,
+          });
+
+        const raw =
+          await response.text();
+
+        let data: any = {};
+
+        if (raw.trim()) {
+          try {
+            data = JSON.parse(raw);
+          } catch {
+            throw new Error(
+              raw.trim().slice(0, 1000)
+            );
+          }
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            data?.error ||
+              data?.message ||
+              `DOG server error (${response.status}).`
+          );
+        }
+
+        const answer =
+          typeof data?.text ===
+          "string"
+            ? data.text.trim()
+            : "";
+
+        if (!answer) {
+          throw new Error(
+            "DOG returned an empty response."
+          );
+        }
+
+        /*
+         * Put the complete answer into the UI
+         * immediately. No artificial typing delay
+         * can make the app look stuck.
+         */
+        if (
+          requestId ===
+          sessionRef.current
+        ) {
+          setMessages((current) => [
+            ...current,
+            {
+              role: "assistant",
+              content: answer,
+            },
+          ]);
+        }
+
+        /*
+         * Save DOG response.
+         */
+        await saveMessage(
+          chatId,
+          "assistant",
+          answer
+        );
+      } finally {
+        window.clearTimeout(
+          timeout
+        );
+      }
+    } catch (error) {
+      if (
+        requestId !==
+        sessionRef.current
+      ) {
+        return;
+      }
+
+      let errorMessage =
+        "DOG could not get a response.";
+
+      if (
+        error instanceof Error
+      ) {
+        if (
+          error.name ===
+          "AbortError"
+        ) {
+          errorMessage =
+            "DOG took too long to respond. Please try again.";
+        } else {
+          errorMessage =
+            error.message;
+        }
+      }
+
+      /*
+       * Never hide the user's message.
+       * Show the actual error in the chat.
+       */
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content: errorMessage,
+        },
+      ]);
+
+      /*
+       * If a chat was created, also save
+       * the error so refresh doesn't make
+       * the conversation look empty.
+       */
+      if (chatId) {
+        try {
+          await saveMessage(
+            chatId,
+            "assistant",
+            errorMessage
+          );
+        } catch {
+          // UI already contains the error.
+        }
+      }
+    } finally {
+      if (
+        requestId ===
+        sessionRef.current
+      ) {
+        setLoading(false);
+        requestRef.current = null;
+      }
+    }
+  };
+
+  const activeTitle =
+    chats.find(
+      (chat) =>
+        chat.id === activeChatId
+    )?.title ||
+    "New discussion";
+
+  const inChat = !newSession;
+
+  const formatText = (
+    text: string
+  ) => {
+    return text
+      .split(
+        /(```[\s\S]*?```)/g
+      )
+      .map((part, index) => {
+        if (
+          part.startsWith("```")
+        ) {
+          return (
+            <pre key={index}>
+              {part
+                .replace(
+                  /^```\w*\n?/,
+                  ""
+                )
+                .replace(
+                  /```$/,
+                  ""
+                )}
+            </pre>
+          );
+        }
+
+        return part
+          .split(/\n\n+/)
+          .map((paragraph, i) => (
+            <p
+              key={`${index}-${i}`}
+            >
+              {paragraph
+                .replace(
+                  /^###\s+/gm,
+                  ""
+                )
+                .replace(
+                  /^##\s+/gm,
+                  ""
+                )
+                .replace(
+                  /^#\s+/gm,
+                  ""
+                )}
+            </p>
+          ));
+      });
+  };
+
+  return (
+    <div
+      className={`home ${
+        inChat
+          ? "chat-active"
+          : "home-idle"
+      }`}
+    >
+      <header className="mobile-header">
+        <button
+          className="menu-button"
+          onClick={onOpenMenu}
+          aria-label="Open menu"
+        >
+          <Menu size={25} />
+        </button>
+
+        <div className="mobile-brand">
+          DOG
+        </div>
+
+        <button
+          className="mobile-profile-button"
+          onClick={onOpenAccount}
+          aria-label="Open account"
+        >
+          <UserCircle2 size={25} />
+        </button>
+      </header>
+
+      {!inChat && (
+        <>
+          <section className="feature-section">
+            <button
+              className="feature-card compact-feature"
+              onClick={() =>
+                onNavigate("images")
+              }
+            >
+              <div className="feature-icon">
+                <ImageIcon size={26} />
+              </div>
+
+              <div className="feature-title">
+                Image Creation
+              </div>
+            </button>
+
+            <button
+              className="feature-card compact-feature"
+              onClick={() =>
+                onNavigate("code")
+              }
+            >
+              <div className="feature-icon">
+                <Code2 size={26} />
+              </div>
+
+              <div className="feature-title">
+                Code Builder
+              </div>
+            </button>
+          </section>
+
+          <section className="hero-section">
+            <DogLoader size={92} />
+
+            <h1>
+              Hello,{" "}
+              {user?.displayName?.split(
+                " "
+              )[0] || "there"}
+              .
+              <br />
+              What are you building?
+            </h1>
+
+            {memoryEnabled && (
+              <div className="memory-hint">
+                <Brain size={16} />
+                Memory is on
+              </div>
+            )}
+          </section>
+        </>
+      )}
+
+      {inChat && (
+        <section className="discussion-screen">
+          <div className="discussion-head">
+            <strong>
+              {activeTitle}
+            </strong>
+
+            <button
+              onClick={startNewChat}
+            >
+              <Plus size={16} />
+              New discussion
+            </button>
+          </div>
+
+          <div className="discussion-messages">
+            {messages.map(
+              (message, index) => (
+                <div
+                  className={`message-bubble ${message.role}`}
+                  key={`${index}-${message.content.slice(
+                    0,
+                    10
+                  )}`}
+                >
+                  <div className="preview-label">
+                    {message.role ===
+                    "user"
+                      ? "You"
+                      : "DOG"}
+                  </div>
+
+                  <div className="preview-message">
+                    {message.role ===
+                    "assistant" ? (
+                      formatText(
+                        message.content
+                      )
+                    ) : (
+                      <p>
+                        {
+                          message.content
+                        }
+                      </p>
+                    )}
+                  </div>
+
+                  {message.role ===
+                    "assistant" && (
+                    <button
+                      className="copy-response"
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(
+                          message.content
+                        );
+
+                        setCopied(
+                          String(index)
+                        );
+
+                        window.setTimeout(
+                          () =>
+                            setCopied(
+                              null
+                            ),
+                          1200
+                        );
+                      }}
+                    >
+                      <Copy size={14} />
+
+                      {copied ===
+                      String(index)
+                        ? "Copied"
+                        : "Copy"}
+                    </button>
+                  )}
+                </div>
+              )
+            )}
+
+            {loading && (
+              <div className="ai-loading">
+                <DogLoader
+                  size={46}
+                  label="DOG is thinking…"
+                />
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      <section
+        className={`chat-section ${
+          inChat
+            ? "chat-section-active"
+            : ""
+        }`}
+      >
+        <ChatInput
+          onSend={handleSend}
+          disabled={loading}
+        />
+      </section>
+    </div>
+  );
 }
