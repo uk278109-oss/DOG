@@ -11,12 +11,12 @@ const SYSTEM_PROMPT = `
 You are DOG, a helpful AI assistant.
 
 For coding requests:
-- If requirements are unclear, ask the necessary question.
-- If requirements are clear, provide working code.
+- If the requirements are unclear, ask the necessary question.
+- If the requirements are clear, provide working code.
 - Be practical and direct.
 
-Never mention internal providers, API keys,
-routing, environment variables, or backend implementation.
+Never mention internal providers, API keys, routing,
+environment variables, or backend implementation.
 `.trim();
 
 function getMessages(body: any): Message[] {
@@ -25,8 +25,7 @@ function getMessages(body: any): Message[] {
         .filter(
           (m: any) =>
             m &&
-            (m.role === "user" ||
-              m.role === "assistant") &&
+            (m.role === "user" || m.role === "assistant") &&
             typeof m.content === "string" &&
             m.content.trim()
         )
@@ -59,20 +58,10 @@ function getMessages(body: any): Message[] {
   return history.slice(-20);
 }
 
-function timeoutController() {
-  const controller = new AbortController();
-
-  setTimeout(() => {
-    controller.abort();
-  }, REQUEST_TIMEOUT_MS);
-
-  return controller;
-}
-
 async function askGrok(
   messages: Message[],
-  controller: AbortController
-) {
+  signal: AbortSignal
+): Promise<string> {
   const key =
     process.env.XAI_API_KEY?.trim() ||
     process.env.GROK_API_KEY?.trim();
@@ -90,10 +79,7 @@ async function askGrok(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model:
-          process.env.XAI_TEXT_MODEL?.trim() ||
-          process.env.GROK_TEXT_MODEL?.trim() ||
-          "grok-beta",
+        model: "grok-beta",
         messages: [
           {
             role: "system",
@@ -103,7 +89,7 @@ async function askGrok(
         ],
         temperature: 0.4,
       }),
-      signal: controller.signal,
+      signal,
     }
   );
 
@@ -112,7 +98,7 @@ async function askGrok(
   if (!response.ok) {
     throw new Error(
       data?.error?.message ||
-        `Grok returned ${response.status}`
+        `Grok returned ${response.status}.`
     );
   }
 
@@ -129,22 +115,18 @@ async function askGrok(
 
 async function askGemini(
   messages: Message[],
-  controller: AbortController
-) {
+  signal: AbortSignal
+): Promise<string> {
   const key = process.env.GEMINI_API_KEY?.trim();
 
   if (!key) {
     throw new Error("Gemini API key is not configured.");
   }
 
-  const model =
-    process.env.GEMINI_TEXT_MODEL?.trim() ||
-    "gemini-1.5-flash";
-
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-      model
-    )}:generateContent?key=${encodeURIComponent(key)}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(
+      key
+    )}`,
     {
       method: "POST",
       headers: {
@@ -163,13 +145,17 @@ async function askGemini(
             m.role === "assistant"
               ? "model"
               : "user",
-          parts: [{ text: m.content }],
+          parts: [
+            {
+              text: m.content,
+            },
+          ],
         })),
         generationConfig: {
           temperature: 0.4,
         },
       }),
-      signal: controller.signal,
+      signal,
     }
   );
 
@@ -178,7 +164,7 @@ async function askGemini(
   if (!response.ok) {
     throw new Error(
       data?.error?.message ||
-        `Gemini returned ${response.status}`
+        `Gemini returned ${response.status}.`
     );
   }
 
@@ -195,22 +181,29 @@ async function askGemini(
   return text;
 }
 
-async function raceProviders(messages: Message[]) {
-  const grokController = timeoutController();
-  const geminiController = timeoutController();
+async function raceProviders(
+  messages: Message[]
+): Promise<string> {
+  const grokController = new AbortController();
+  const geminiController = new AbortController();
 
-  return new Promise<string>((resolve, reject) => {
+  const timeout = setTimeout(() => {
+    grokController.abort();
+    geminiController.abort();
+  }, REQUEST_TIMEOUT_MS);
+
+  return new Promise((resolve, reject) => {
     let failures = 0;
     let finished = false;
-
     const errors: string[] = [];
 
     const success = (text: string) => {
       if (finished) return;
 
       finished = true;
+      clearTimeout(timeout);
 
-      // Stop losing request immediately.
+      // Stop the losing request.
       grokController.abort();
       geminiController.abort();
 
@@ -225,11 +218,12 @@ async function raceProviders(messages: Message[]) {
       errors.push(
         error instanceof Error
           ? error.message
-          : "Provider failed."
+          : "Provider request failed."
       );
 
       if (failures === 2) {
         finished = true;
+        clearTimeout(timeout);
 
         reject(
           new Error(
@@ -240,11 +234,17 @@ async function raceProviders(messages: Message[]) {
       }
     };
 
-    void askGrok(messages, grokController)
+    void askGrok(
+      messages,
+      grokController.signal
+    )
       .then(success)
       .catch(failure);
 
-    void askGemini(messages, geminiController)
+    void askGemini(
+      messages,
+      geminiController.signal
+    )
       .then(success)
       .catch(failure);
   });
@@ -283,7 +283,7 @@ export default async function handler(
     const message =
       error instanceof Error
         ? error.name === "AbortError"
-          ? "DOG timed out. Please try again."
+          ? "DOG timed out after 8 seconds."
           : error.message
         : "DOG could not get a response.";
 
@@ -292,4 +292,4 @@ export default async function handler(
       error: message,
     });
   }
-        }
+             }
