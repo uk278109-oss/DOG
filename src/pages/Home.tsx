@@ -1,23 +1,6 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-} from "react";
-
-import {
-  Menu,
-  Image as ImageIcon,
-  Code2,
-  Brain,
-  UserCircle2,
-  Copy,
-  Plus,
-  RotateCcw,
-} from "lucide-react";
-
-import DogLoader from "../components/DogLoader";
+import { useEffect, useRef, useState } from "react";
+import { Menu, UserCircle2, Copy } from "lucide-react";
 import ChatInput from "../components/ChatInput";
-import { useAuth } from "../context/AuthContext";
 import { useApp } from "../context/AppContext";
 import type { AppPage } from "../types";
 
@@ -32,98 +15,88 @@ type Msg = {
   content: string;
 };
 
+function formatText(text: string) {
+  return text
+    .split(/(```[\s\S]*?```)/g)
+    .map((part, i) =>
+      part.startsWith("```") ? (
+        <pre key={i}>
+          {part.replace(/^```\w*\n?/, "").replace(/```$/, "")}
+        </pre>
+      ) : (
+        part
+          .split(/\n\n+/)
+          .filter(Boolean)
+          .map((p, j) => (
+            <p key={`${i}-${j}`}>
+              {p
+                .replace(/^###\s+/gm, "")
+                .replace(/^##\s+/gm, "")
+                .replace(/^#\s+/gm, "")}
+            </p>
+          ))
+      )
+    );
+}
+
 export default function Home({
   onOpenMenu,
-  onNavigate,
   onOpenAccount,
 }: HomeProps) {
-  const { user } = useAuth();
-
   const {
-    memoryEnabled,
     activeChatId,
     setActiveChatId,
     createChat,
     loadMessages,
     saveMessage,
-    chats,
   } = useApp();
 
-  const [messages, setMessages] =
-    useState<Msg[]>([]);
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [inputKey, setInputKey] = useState(0);
 
-  const [loading, setLoading] =
-    useState(false);
+  const requestRef = useRef<AbortController | null>(null);
+  const sessionRef = useRef(0);
 
-  const [copied, setCopied] =
-    useState<string | null>(null);
-
-  const [newSession, setNewSession] =
-    useState(true);
-
-  const requestRef =
-    useRef<AbortController | null>(null);
-
-  const sessionRef =
-    useRef(0);
-
-  /*
-   * Load a selected existing chat.
-   */
   useEffect(() => {
     let cancelled = false;
 
     if (!activeChatId) {
       setMessages([]);
-      setNewSession(true);
-      return;
+      setLoading(false);
+      setCopied(null);
+      setInputKey((v) => v + 1);
+      return () => {
+        cancelled = true;
+      };
     }
 
-    setNewSession(false);
-
-    const run = async () => {
+    void (async () => {
       try {
-        const saved =
-          await loadMessages(
-            activeChatId
+        const saved = await loadMessages(activeChatId);
+
+        if (!cancelled) {
+          setMessages(
+            saved.map((m) => ({
+              role: m.role,
+              content: m.content,
+            }))
           );
-
-        if (cancelled) return;
-
-        setMessages(
-          saved.map((message) => ({
-            role: message.role,
-            content: message.content,
-          }))
-        );
-      } catch (error) {
-        if (cancelled) return;
-
-        setMessages([
-          {
-            role: "assistant",
-            content:
-              error instanceof Error
-                ? error.message
-                : "DOG could not load this chat.",
-          },
-        ]);
+          setInputKey((v) => v + 1);
+        }
+      } catch {
+        if (!cancelled) {
+          setMessages([]);
+        }
       }
-    };
-
-    void run();
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [
-    activeChatId,
-    loadMessages,
-  ]);
+  }, [activeChatId, loadMessages]);
 
-  /*
-   * Start a genuinely fresh conversation.
-   */
   const startNewChat = () => {
     sessionRef.current += 1;
 
@@ -133,339 +106,160 @@ export default function Home({
     setLoading(false);
     setMessages([]);
     setCopied(null);
-    setNewSession(true);
+
+    // Forces ChatInput to remount and clear its internal text.
+    setInputKey((v) => v + 1);
+
     setActiveChatId(null);
   };
 
-  /*
-   * Send message.
-   *
-   * Important:
-   * 1. Show the message immediately.
-   * 2. Create/save chat.
-   * 3. Ask DOG.
-   * 4. Show/save response.
-   *
-   * A Firebase/API failure must never erase
-   * the user's message.
-   */
-  const handleSend = async (
-    rawMessage: string
-  ) => {
-    const message = rawMessage.trim();
+  const handleSend = async (message: string) => {
+    const text = message.trim();
 
-    if (!message || loading) return;
+    if (!text || loading) return;
 
-    const requestId =
-      ++sessionRef.current;
+    const requestId = ++sessionRef.current;
 
-    requestRef.current?.abort();
+    // Immediately clear ChatInput.
+    setInputKey((v) => v + 1);
 
-    /*
-     * Immediately show the user's message.
-     */
-    setNewSession(false);
+    let chatId = activeChatId;
 
+    const history = messages.slice(-12).map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    // Show YOU message immediately.
     setMessages((current) => [
       ...current,
       {
         role: "user",
-        content: message,
+        content: text,
       },
     ]);
 
     setLoading(true);
 
-    let chatId =
-      activeChatId;
-
     try {
-      /*
-       * Create a chat only when needed.
-       */
       if (!chatId) {
-        chatId = await createChat(
-          message.slice(0, 45) ||
-            "New chat"
-        );
-
-        if (!chatId) {
-          throw new Error(
-            "DOG could not create the conversation."
-          );
-        }
+        chatId = await createChat(text.slice(0, 45) || "New chat");
       }
 
-      if (
-        requestId !==
-        sessionRef.current
-      ) {
-        return;
-      }
+      if (!chatId || requestId !== sessionRef.current) return;
 
-      /*
-       * Save the user's message.
-       */
-      await saveMessage(
-        chatId,
-        "user",
-        message
-      );
+      // Save YOU message.
+      await saveMessage(chatId, "user", text);
 
-      if (
-        requestId !==
-        sessionRef.current
-      ) {
-        return;
-      }
+      if (requestId !== sessionRef.current) return;
 
-      /*
-       * Now make this chat active.
-       */
       setActiveChatId(chatId);
 
-      /*
-       * Include the message being sent.
-       * Do not depend on React state having updated yet.
-       */
-      const currentHistory =
-        messages.slice(-12);
+      const controller = new AbortController();
+      requestRef.current = controller;
 
-      const history = [
-        ...currentHistory,
-        {
-          role: "user" as const,
-          content: message,
-        },
-      ];
-
-      const controller =
-        new AbortController();
-
-      requestRef.current =
-        controller;
-
-      const timeout =
-        window.setTimeout(() => {
-          controller.abort();
-        }, 30000);
+      const timeout = window.setTimeout(() => {
+        controller.abort();
+      }, 9000);
 
       try {
-        const response =
-          await fetch("/api/chat", {
-            method: "POST",
-            headers: {
-              "Content-Type":
-                "application/json",
-              Accept:
-                "application/json",
-            },
-            body: JSON.stringify({
-              message,
-              history,
-            }),
-            signal:
-              controller.signal,
-          });
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            message: text,
+            history,
+          }),
+          signal: controller.signal,
+        });
 
-        const raw =
-          await response.text();
+        const raw = await response.text();
 
-        let data: any = {};
+        let data: {
+          ok?: boolean;
+          text?: string;
+          error?: string;
+        } = {};
 
-        if (raw.trim()) {
-          try {
-            data = JSON.parse(raw);
-          } catch {
-            throw new Error(
-              raw.trim().slice(0, 1000)
-            );
-          }
+        try {
+          data = raw ? JSON.parse(raw) : {};
+        } catch {
+          throw new Error(
+            raw.trim() ||
+              `DOG server returned an invalid response (${response.status}).`
+          );
         }
 
         if (!response.ok) {
           throw new Error(
-            data?.error ||
-              data?.message ||
-              `DOG server error (${response.status}).`
+            data.error ||
+              `DOG could not get a response (${response.status}).`
           );
         }
 
-        const answer =
-          typeof data?.text ===
-          "string"
-            ? data.text.trim()
-            : "";
+        const answer = String(data.text || "").trim();
 
         if (!answer) {
-          throw new Error(
-            "DOG returned an empty response."
-          );
+          throw new Error("DOG returned an empty response.");
         }
 
-        /*
-         * Put the complete answer into the UI
-         * immediately. No artificial typing delay
-         * can make the app look stuck.
-         */
-        if (
-          requestId ===
-          sessionRef.current
-        ) {
-          setMessages((current) => [
-            ...current,
-            {
-              role: "assistant",
-              content: answer,
-            },
-          ]);
-        }
+        if (requestId !== sessionRef.current) return;
 
-        /*
-         * Save DOG response.
-         */
-        await saveMessage(
-          chatId,
-          "assistant",
-          answer
-        );
+        // Show DOG response immediately.
+        setMessages((current) => [
+          ...current,
+          {
+            role: "assistant",
+            content: answer,
+          },
+        ]);
+
+        await saveMessage(chatId, "assistant", answer);
       } finally {
-        window.clearTimeout(
-          timeout
-        );
+        window.clearTimeout(timeout);
+
+        if (requestRef.current === controller) {
+          requestRef.current = null;
+        }
       }
     } catch (error) {
-      if (
-        requestId !==
-        sessionRef.current
-      ) {
-        return;
-      }
+      if (requestId !== sessionRef.current) return;
 
-      let errorMessage =
-        "DOG could not get a response.";
-
-      if (
+      const errorText =
         error instanceof Error
-      ) {
-        if (
-          error.name ===
-          "AbortError"
-        ) {
-          errorMessage =
-            "DOG took too long to respond. Please try again.";
-        } else {
-          errorMessage =
-            error.message;
-        }
-      }
+          ? error.name === "AbortError"
+            ? "DOG request timed out. Please try again."
+            : error.message
+          : "DOG could not get a response.";
 
-      /*
-       * Never hide the user's message.
-       * Show the actual error in the chat.
-       */
       setMessages((current) => [
         ...current,
         {
           role: "assistant",
-          content: errorMessage,
+          content: errorText,
         },
       ]);
 
-      /*
-       * If a chat was created, also save
-       * the error so refresh doesn't make
-       * the conversation look empty.
-       */
       if (chatId) {
         try {
-          await saveMessage(
-            chatId,
-            "assistant",
-            errorMessage
-          );
+          await saveMessage(chatId, "assistant", errorText);
         } catch {
-          // UI already contains the error.
+          // Keep the error visible even if saving fails.
         }
       }
     } finally {
-      if (
-        requestId ===
-        sessionRef.current
-      ) {
+      if (requestId === sessionRef.current) {
         setLoading(false);
         requestRef.current = null;
       }
     }
   };
 
-  const activeTitle =
-    chats.find(
-      (chat) =>
-        chat.id === activeChatId
-    )?.title ||
-    "New discussion";
-
-  const inChat = !newSession;
-
-  const formatText = (
-    text: string
-  ) => {
-    return text
-      .split(
-        /(```[\s\S]*?```)/g
-      )
-      .map((part, index) => {
-        if (
-          part.startsWith("```")
-        ) {
-          return (
-            <pre key={index}>
-              {part
-                .replace(
-                  /^```\w*\n?/,
-                  ""
-                )
-                .replace(
-                  /```$/,
-                  ""
-                )}
-            </pre>
-          );
-        }
-
-        return part
-          .split(/\n\n+/)
-          .map((paragraph, i) => (
-            <p
-              key={`${index}-${i}`}
-            >
-              {paragraph
-                .replace(
-                  /^###\s+/gm,
-                  ""
-                )
-                .replace(
-                  /^##\s+/gm,
-                  ""
-                )
-                .replace(
-                  /^#\s+/gm,
-                  ""
-                )}
-            </p>
-          ));
-      });
-  };
-
   return (
-    <div
-      className={`home ${
-        inChat
-          ? "chat-active"
-          : "home-idle"
-      }`}
-    >
+    <div className="home chat-active">
       <header className="mobile-header">
         <button
           className="menu-button"
@@ -475,9 +269,7 @@ export default function Home({
           <Menu size={25} />
         </button>
 
-        <div className="mobile-brand">
-          DOG
-        </div>
+        <div />
 
         <button
           className="mobile-profile-button"
@@ -488,168 +280,63 @@ export default function Home({
         </button>
       </header>
 
-      {!inChat && (
-        <>
-          <section className="feature-section">
-            <button
-              className="feature-card compact-feature"
-              onClick={() =>
-                onNavigate("images")
-              }
+      <section className="discussion-screen">
+        <div className="discussion-messages">
+          {messages.map((m, i) => (
+            <div
+              className={`message-bubble ${m.role}`}
+              key={`${i}-${m.content.slice(0, 12)}`}
             >
-              <div className="feature-icon">
-                <ImageIcon size={26} />
+              <div className="preview-label">
+                {m.role === "user" ? "You" : "DOG"}
               </div>
 
-              <div className="feature-title">
-                Image Creation
-              </div>
-            </button>
-
-            <button
-              className="feature-card compact-feature"
-              onClick={() =>
-                onNavigate("code")
-              }
-            >
-              <div className="feature-icon">
-                <Code2 size={26} />
+              <div className="preview-message">
+                {m.role === "assistant" ? (
+                  formatText(m.content)
+                ) : (
+                  <p>{m.content}</p>
+                )}
               </div>
 
-              <div className="feature-title">
-                Code Builder
-              </div>
-            </button>
-          </section>
+              {m.role === "assistant" && (
+                <button
+                  className="copy-response"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(m.content);
+                    setCopied(String(i));
 
-          <section className="hero-section">
-            <DogLoader size={92} />
-
-            <h1>
-              Hello,{" "}
-              {user?.displayName?.split(
-                " "
-              )[0] || "there"}
-              .
-              <br />
-              What are you building?
-            </h1>
-
-            {memoryEnabled && (
-              <div className="memory-hint">
-                <Brain size={16} />
-                Memory is on
-              </div>
-            )}
-          </section>
-        </>
-      )}
-
-      {inChat && (
-        <section className="discussion-screen">
-          <div className="discussion-head">
-            <strong>
-              {activeTitle}
-            </strong>
-
-            <button
-              onClick={startNewChat}
-            >
-              <Plus size={16} />
-              New discussion
-            </button>
-          </div>
-
-          <div className="discussion-messages">
-            {messages.map(
-              (message, index) => (
-                <div
-                  className={`message-bubble ${message.role}`}
-                  key={`${index}-${message.content.slice(
-                    0,
-                    10
-                  )}`}
+                    window.setTimeout(
+                      () => setCopied(null),
+                      1200
+                    );
+                  }}
                 >
-                  <div className="preview-label">
-                    {message.role ===
-                    "user"
-                      ? "You"
-                      : "DOG"}
-                  </div>
+                  <Copy size={14} />
+                  {copied === String(i) ? "Copied" : "Copy"}
+                </button>
+              )}
+            </div>
+          ))}
 
-                  <div className="preview-message">
-                    {message.role ===
-                    "assistant" ? (
-                      formatText(
-                        message.content
-                      )
-                    ) : (
-                      <p>
-                        {
-                          message.content
-                        }
-                      </p>
-                    )}
-                  </div>
-
-                  {message.role ===
-                    "assistant" && (
-                    <button
-                      className="copy-response"
-                      onClick={() => {
-                        void navigator.clipboard?.writeText(
-                          message.content
-                        );
-
-                        setCopied(
-                          String(index)
-                        );
-
-                        window.setTimeout(
-                          () =>
-                            setCopied(
-                              null
-                            ),
-                          1200
-                        );
-                      }}
-                    >
-                      <Copy size={14} />
-
-                      {copied ===
-                      String(index)
-                        ? "Copied"
-                        : "Copy"}
-                    </button>
-                  )}
-                </div>
-              )
-            )}
-
-            {loading && (
-              <div className="ai-loading">
-                <DogLoader
-                  size={46}
-                  label="DOG is thinking…"
-                />
+          {loading && (
+            <div className="ai-loading">
+              <div className="preview-label">DOG</div>
+              <div className="preview-message">
+                DOG is thinking…
               </div>
-            )}
-          </div>
-        </section>
-      )}
+            </div>
+          )}
+        </div>
+      </section>
 
-      <section
-        className={`chat-section ${
-          inChat
-            ? "chat-section-active"
-            : ""
-        }`}
-      >
+      <section className="chat-section chat-section-active">
         <ChatInput
+          key={`${activeChatId ?? "new"}-${inputKey}`}
           onSend={handleSend}
           disabled={loading}
         />
       </section>
     </div>
   );
-}
+         }
