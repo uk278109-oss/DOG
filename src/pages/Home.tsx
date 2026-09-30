@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Menu, UserCircle2, Copy } from "lucide-react";
+import DogLoader from "../components/DogLoader";
 import ChatInput from "../components/ChatInput";
 import { useApp } from "../context/AppContext";
 import type { AppPage } from "../types";
@@ -53,11 +54,12 @@ export default function Home({
 
   const [messages, setMessages] = useState<Msg[]>([]);
   const [loading, setLoading] = useState(false);
-  const [copied, setCopied] = useState<string | null>(null);
-  const [inputKey, setInputKey] = useState(0);
+  const [copied, setCopied] = useState<number | null>(null);
 
   const requestRef = useRef<AbortController | null>(null);
   const sessionRef = useRef(0);
+
+  const isEmpty = messages.length === 0 && !loading;
 
   useEffect(() => {
     let cancelled = false;
@@ -65,8 +67,6 @@ export default function Home({
     if (!activeChatId) {
       setMessages([]);
       setLoading(false);
-      setCopied(null);
-      setInputKey((v) => v + 1);
       return () => {
         cancelled = true;
       };
@@ -83,12 +83,9 @@ export default function Home({
               content: m.content,
             }))
           );
-          setInputKey((v) => v + 1);
         }
       } catch {
-        if (!cancelled) {
-          setMessages([]);
-        }
+        if (!cancelled) setMessages([]);
       }
     })();
 
@@ -97,32 +94,12 @@ export default function Home({
     };
   }, [activeChatId, loadMessages]);
 
-  const startNewChat = () => {
-    sessionRef.current += 1;
-
-    requestRef.current?.abort();
-    requestRef.current = null;
-
-    setLoading(false);
-    setMessages([]);
-    setCopied(null);
-
-    // Forces ChatInput to remount and clear its internal text.
-    setInputKey((v) => v + 1);
-
-    setActiveChatId(null);
-  };
-
   const handleSend = async (message: string) => {
     const text = message.trim();
 
     if (!text || loading) return;
 
     const requestId = ++sessionRef.current;
-
-    // Immediately clear ChatInput.
-    setInputKey((v) => v + 1);
-
     let chatId = activeChatId;
 
     const history = messages.slice(-12).map((m) => ({
@@ -130,13 +107,9 @@ export default function Home({
       content: m.content,
     }));
 
-    // Show YOU message immediately.
     setMessages((current) => [
       ...current,
-      {
-        role: "user",
-        content: text,
-      },
+      { role: "user", content: text },
     ]);
 
     setLoading(true);
@@ -148,7 +121,6 @@ export default function Home({
 
       if (!chatId || requestId !== sessionRef.current) return;
 
-      // Save YOU message.
       await saveMessage(chatId, "user", text);
 
       if (requestId !== sessionRef.current) return;
@@ -160,7 +132,7 @@ export default function Home({
 
       const timeout = window.setTimeout(() => {
         controller.abort();
-      }, 9000);
+      }, 8500);
 
       try {
         const response = await fetch("/api/chat", {
@@ -182,21 +154,20 @@ export default function Home({
           ok?: boolean;
           text?: string;
           error?: string;
-        } = {};
+        };
 
         try {
           data = raw ? JSON.parse(raw) : {};
         } catch {
           throw new Error(
-            raw.trim() ||
-              `DOG server returned an invalid response (${response.status}).`
+            raw || `Invalid DOG response (${response.status})`
           );
         }
 
         if (!response.ok) {
           throw new Error(
             data.error ||
-              `DOG could not get a response (${response.status}).`
+              `DOG server error (${response.status})`
           );
         }
 
@@ -208,7 +179,6 @@ export default function Home({
 
         if (requestId !== sessionRef.current) return;
 
-        // Show DOG response immediately.
         setMessages((current) => [
           ...current,
           {
@@ -247,7 +217,7 @@ export default function Home({
         try {
           await saveMessage(chatId, "assistant", errorText);
         } catch {
-          // Keep the error visible even if saving fails.
+          // Keep visible error.
         }
       }
     } finally {
@@ -280,63 +250,87 @@ export default function Home({
         </button>
       </header>
 
-      <section className="discussion-screen">
-        <div className="discussion-messages">
-          {messages.map((m, i) => (
-            <div
-              className={`message-bubble ${m.role}`}
-              key={`${i}-${m.content.slice(0, 12)}`}
-            >
-              <div className="preview-label">
-                {m.role === "user" ? "You" : "DOG"}
-              </div>
+      {isEmpty && (
+        <section className="hero-section">
+          <DogLoader size={150} />
 
-              <div className="preview-message">
-                {m.role === "assistant" ? (
-                  formatText(m.content)
-                ) : (
-                  <p>{m.content}</p>
+          <h1>What would you like to build?</h1>
+
+          <p>
+            Turn your ideas into something real.
+          </p>
+
+          <div className="hero-action">
+            Write or edit
+          </div>
+        </section>
+      )}
+
+      {!isEmpty && (
+        <section className="discussion-screen">
+          <div className="discussion-messages">
+            {messages.map((message, index) => (
+              <div
+                key={`${index}-${message.content.slice(0, 10)}`}
+                className={`message-bubble ${message.role}`}
+              >
+                <div className="preview-label">
+                  {message.role === "user" ? "You" : "DOG"}
+                </div>
+
+                <div className="preview-message">
+                  {message.role === "assistant" ? (
+                    formatText(message.content)
+                  ) : (
+                    <p>{message.content}</p>
+                  )}
+                </div>
+
+                {message.role === "assistant" && (
+                  <button
+                    className="copy-response"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(
+                        message.content
+                      );
+
+                      setCopied(index);
+
+                      window.setTimeout(
+                        () => setCopied(null),
+                        1200
+                      );
+                    }}
+                  >
+                    <Copy size={14} />
+                    {copied === index ? "Copied" : "Copy"}
+                  </button>
                 )}
               </div>
+            ))}
 
-              {m.role === "assistant" && (
-                <button
-                  className="copy-response"
-                  onClick={() => {
-                    void navigator.clipboard?.writeText(m.content);
-                    setCopied(String(i));
-
-                    window.setTimeout(
-                      () => setCopied(null),
-                      1200
-                    );
-                  }}
-                >
-                  <Copy size={14} />
-                  {copied === String(i) ? "Copied" : "Copy"}
-                </button>
-              )}
-            </div>
-          ))}
-
-          {loading && (
-            <div className="ai-loading">
-              <div className="preview-label">DOG</div>
-              <div className="preview-message">
-                DOG is thinking…
+            {loading && (
+              <div className="ai-loading">
+                <DogLoader
+                  size={72}
+                  label="DOG is thinking…"
+                />
               </div>
-            </div>
-          )}
-        </div>
-      </section>
+            )}
+          </div>
+        </section>
+      )}
 
-      <section className="chat-section chat-section-active">
+      <section
+        className={`chat-section ${
+          !isEmpty ? "chat-section-active" : ""
+        }`}
+      >
         <ChatInput
-          key={`${activeChatId ?? "new"}-${inputKey}`}
           onSend={handleSend}
           disabled={loading}
         />
       </section>
     </div>
   );
-         }
+      }
